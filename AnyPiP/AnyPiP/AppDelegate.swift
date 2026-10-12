@@ -1,0 +1,76 @@
+import Cocoa
+
+@main
+class AppDelegate: NSObject, NSApplicationDelegate {
+    let server = ExtensionServer()
+    var panel: FloatingPanel?
+    var statusItem: NSStatusItem?
+    let freeItem = NSMenuItem(title: "Free PiP (resizable, opacity)", action: #selector(pickFree), keyEquivalent: "")
+    let appleItem = NSMenuItem(title: "Apple PiP (system window)", action: #selector(pickApple), keyEquivalent: "")
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        server.onStart = { [weak self] w, h, _ in DispatchQueue.main.async { self?.openPanel(w: w, h: h) } }
+        server.onFrame = { [weak self] data, paused in DispatchQueue.main.async { self?.panel?.show(frame: data, paused: paused) } }
+        server.onState = { [weak self] paused in DispatchQueue.main.async { self?.panel?.setPaused(paused) } }
+        server.onStop = { [weak self] in DispatchQueue.main.async { self?.closePanel(notify: false) } }
+        server.start()
+        setupStatusItem()
+        NotificationCenter.default.addObserver(forName: .anypipSettingsChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.server.pushSettings(); self?.refreshModeChecks()
+        }
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {} // anypip://start just launches us
+
+    func setupStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = NSImage(systemSymbolName: "pip", accessibilityDescription: "AnyPiP")
+        let menu = NSMenu()
+        for i in [freeItem, appleItem] { i.target = self; menu.addItem(i) }
+        menu.addItem(.separator())
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
+        menu.addItem(NSMenuItem(title: "Quit AnyPiP", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        item.menu = menu
+        statusItem = item
+        refreshModeChecks()
+    }
+
+    func refreshModeChecks() {
+        freeItem.state = Settings.mode == "free" ? .on : .off
+        appleItem.state = Settings.mode == "free" ? .off : .on
+    }
+    func setMode(_ m: String) {
+        Settings.mode = m
+        refreshModeChecks()
+        NotificationCenter.default.post(name: .anypipSettingsChanged, object: nil)
+    }
+    @objc func pickFree() { setMode("free") }
+    @objc func pickApple() { setMode("apple") }
+    @objc func showSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let w = NSApp.windows.first(where: { !($0 is NSPanel) }) { w.makeKeyAndOrderFront(nil) }
+    }
+
+    func openPanel(w: Int, h: Int) {
+        closePanel(notify: false)
+        let p = FloatingPanel(videoSize: NSSize(width: w, height: h))
+        p.onCommand = { [weak self] a, d in self?.server.command(a, delta: d) }
+        p.onClose = { [weak self] in NSLog("AnyPiP: panel closed by user, notifying extension"); self?.panel = nil; self?.server.notifyClosed() }
+        panel = p
+        p.orderFrontRegardless()
+    }
+
+    func closePanel(notify: Bool) {
+        guard let p = panel else { return }
+        p.onClose = nil
+        panel = nil
+        p.close()
+        if notify { server.notifyClosed() }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+}
+
+extension Notification.Name { static let anypipSettingsChanged = Notification.Name("anypipSettingsChanged") }

@@ -1,0 +1,7 @@
+build/
+DerivedData/
+xcuserdata/
+.DS_Store
+*.xcuserstate
+.team
+.bundle
