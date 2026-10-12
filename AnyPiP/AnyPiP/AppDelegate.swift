@@ -15,6 +15,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         server.onStop = { [weak self] in DispatchQueue.main.async { self?.closePanel(notify: false) } }
         server.start()
         setupStatusItem()
+        // Menu-bar agent: no Dock icon, and no window at launch (Settings… opens it on demand).
+        DispatchQueue.main.async { NSApp.windows.filter { !($0 is NSPanel) }.forEach { $0.orderOut(nil) } }
         NotificationCenter.default.addObserver(forName: .anypipSettingsChanged, object: nil, queue: .main) { [weak self] _ in
             self?.server.pushSettings(); self?.refreshModeChecks()
         }
