@@ -6,7 +6,7 @@ import Cocoa
 /// - **Lock** (click-through): the window ignores the mouse so you can work with whatever is under it.
 ///   A small lock badge stays clickable in the corner to unlock (also: menu bar → Unlock).
 /// - **Crop** (fixed scale): resizing the window no longer scales the video — it reveals or hides part
-///   of it, like a viewport. Scroll to pan the visible part, pinch to zoom.
+///   of it, like a viewport. Drag to pan the video, scroll wheel (or pinch) to zoom, ⌘-drag moves the window.
 final class FloatingPanel: NSPanel {
     private let content = PanelContent()
     private var lockBadge: LockBadge?
@@ -121,11 +121,13 @@ final class FloatingPanel: NSPanel {
         if on {
             // The video currently fills the window exactly; freeze it there in screen space.
             content.cropRect = frame
+            isMovableByWindowBackground = false // drags pan the video now; ⌘-drag moves the window
             contentResizeIncrements = NSSize(width: 1, height: 1) // clears the aspect-ratio lock
             contentMinSize = NSSize(width: 60, height: 60)
         } else {
             // Back to "the window is the video": keep the current width, restore the ratio lock.
             content.cropRect = nil
+            isMovableByWindowBackground = true
             contentAspectRatio = videoSize
             let short: CGFloat = 90, ratio = videoSize.width / videoSize.height
             contentMinSize = ratio >= 1 ? NSSize(width: short * ratio, height: short) : NSSize(width: short, height: short / ratio)
@@ -209,7 +211,7 @@ private final class PanelContent: NSView, NSWindowDelegate {
         ])
 
         cropButton.target = self; cropButton.action = #selector(toggleCrop)
-        cropButton.toolTip = "Crop: resize without scaling the video (scroll to pan, pinch to zoom)"
+        cropButton.toolTip = "Crop: edges cut the video instead of scaling it. Drag = pan, wheel = zoom, ⌘-drag = move window"
         lockButton.target = self; lockButton.action = #selector(lock)
         lockButton.toolTip = "Lock: clicks pass through the window"
         modeButtons.setViews([cropButton, lockButton], in: .trailing)
@@ -267,7 +269,19 @@ private final class PanelContent: NSView, NSWindowDelegate {
         bar.animator().alphaValue = 0
         panel?.setCloseVisible(false)
     }
-    override func mouseDown(with event: NSEvent) { showControls(); super.mouseDown(with: event) }
+    override func mouseDown(with event: NSEvent) {
+        showControls()
+        if cropRect != nil, event.modifierFlags.contains(.command) { window?.performDrag(with: event); return }
+        super.mouseDown(with: event)
+    }
+    // Crop mode: dragging pans the video inside the window.
+    override func mouseDragged(with event: NSEvent) {
+        guard var r = cropRect else { return super.mouseDragged(with: event) }
+        r.origin.x += event.deltaX
+        r.origin.y -= event.deltaY
+        cropRect = r
+        clampCrop()
+    }
     override func mouseMoved(with event: NSEvent) { showControls() }
 
     @objc func sliderChanged() { panel?.setOpacity(slider.doubleValue) }
@@ -310,25 +324,28 @@ private final class PanelContent: NSView, NSWindowDelegate {
         cropRect = r
     }
 
-    // ⌥-scroll changes opacity; in crop mode plain scroll pans the video.
+    // ⌥-scroll changes opacity; in crop mode the wheel zooms the video around the cursor.
     override func scrollWheel(with event: NSEvent) {
         guard let p = panel else { return super.scrollWheel(with: event) }
         if event.modifierFlags.contains(.option) {
             p.setOpacity(Double(p.alphaValue) + Double(event.scrollingDeltaY) * 0.005)
-        } else if var r = cropRect {
-            r.origin.x += event.scrollingDeltaX
-            r.origin.y -= event.scrollingDeltaY
-            cropRect = r
-            clampCrop()
+        } else if cropRect != nil {
+            // Mouse wheel ticks are ±1 line; trackpads send fine pixel deltas.
+            let step = event.hasPreciseScrollingDeltas ? 0.005 : 0.1
+            zoom(by: 1 + event.scrollingDeltaY * step)
         } else {
             super.scrollWheel(with: event)
         }
     }
 
-    // Pinch zooms the video around the cursor in crop mode.
+    // Pinch zooms too (trackpad).
     override func magnify(with event: NSEvent) {
-        guard var r = cropRect else { return super.magnify(with: event) }
-        let f = 1 + event.magnification
+        guard cropRect != nil else { return super.magnify(with: event) }
+        zoom(by: 1 + event.magnification)
+    }
+
+    private func zoom(by f: CGFloat) {
+        guard var r = cropRect, f > 0 else { return }
         let newW = r.width * f
         guard newW >= 80, newW <= 8000 else { return }
         let m = NSEvent.mouseLocation
