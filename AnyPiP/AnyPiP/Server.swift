@@ -9,6 +9,7 @@ final class ExtensionServer {
     var onFrame: ((Data, Bool) -> Void)?
     var onStop: (() -> Void)?
     var onState: ((Bool) -> Void)?
+    var onNeedWake: (() -> Void)?
     private var rxCount = 0, rxSince = Date()
 
     private var listener: NWListener?
@@ -88,7 +89,10 @@ final class ExtensionServer {
     func send(_ obj: [String: Any], queueIfOffline: Bool = true) {
         queue.async {
             if self.client == nil {
-                if queueIfOffline { self.pending.append(obj); if self.pending.count > 20 { self.pending.removeFirst() } }
+                if queueIfOffline {
+                    self.pending.append(obj); if self.pending.count > 20 { self.pending.removeFirst() }
+                    self.onNeedWake?()
+                }
                 return
             }
             self.write(obj)

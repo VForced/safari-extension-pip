@@ -1,10 +1,22 @@
 import Cocoa
 
 /// Always-on-top, freely resizable window that shows the streamed video frames.
+///
+/// Modes (both toggled from the top-right buttons, which fade in with the other controls):
+/// - **Lock** (click-through): the window ignores the mouse so you can work with whatever is under it.
+///   A small lock badge stays clickable in the corner to unlock (also: menu bar → Unlock).
+/// - **Crop** (fixed scale): resizing the window no longer scales the video — it reveals or hides part
+///   of it, like a viewport. Scroll to pan the visible part, pinch to zoom.
 final class FloatingPanel: NSPanel {
     private let content = PanelContent()
+    private var lockBadge: LockBadge?
     var onClose: (() -> Void)?
     var onCommand: ((String, Double) -> Void)?
+    var onLockChanged: ((Bool) -> Void)?
+
+    private(set) var videoSize = NSSize(width: 16, height: 9)
+    private(set) var isLocked = false
+    var isCropping: Bool { content.cropRect != nil }
 
     init(videoSize: NSSize) {
         let w: CGFloat = 480
@@ -49,10 +61,16 @@ final class FloatingPanel: NSPanel {
 
     func show(frame data: Data, paused: Bool) { content.show(jpeg: data); content.setPaused(paused) }
 
-    /// Lock the window to the video's aspect ratio (no letterboxing); keep the current width.
+    /// Normal mode: lock the window to the video's aspect ratio (no letterboxing), keep the width.
+    /// Crop mode: the window is a free viewport; only the video's own rect follows a ratio change.
     func fit(to size: NSSize) {
         guard size.width > 0, size.height > 0 else { return }
+        videoSize = size
         let ratio = size.width / size.height
+        if var r = content.cropRect {
+            if abs(r.width / r.height - ratio) > 0.01 { r.size.height = r.width / ratio; content.cropRect = r }
+            return
+        }
         // Min size must itself have the video's ratio, or the aspect lock breaks when squeezed.
         let short: CGFloat = 90
         contentMinSize = ratio >= 1 ? NSSize(width: short * ratio, height: short) : NSSize(width: short, height: short / ratio)
@@ -69,28 +87,92 @@ final class FloatingPanel: NSPanel {
         content.slider.doubleValue = c
     }
 
+    // MARK: Lock (click-through)
+
+    func setLocked(_ on: Bool) {
+        guard on != isLocked else { return }
+        isLocked = on
+        ignoresMouseEvents = on
+        content.hideControls()
+        if on {
+            let badge = LockBadge { [weak self] in self?.setLocked(false) }
+            addChildWindow(badge, ordered: .above) // moves with the panel
+            lockBadge = badge
+            positionLockBadge()
+        } else if let badge = lockBadge {
+            removeChildWindow(badge)
+            badge.orderOut(nil)
+            lockBadge = nil
+        }
+        content.syncModeButtons()
+        onLockChanged?(on)
+    }
+
+    func positionLockBadge() {
+        guard let b = lockBadge else { return }
+        let s = b.frame.size
+        b.setFrameOrigin(NSPoint(x: frame.maxX - s.width - 8, y: frame.maxY - s.height - 8))
+    }
+
+    // MARK: Crop (fixed scale viewport)
+
+    func setCropping(_ on: Bool) {
+        guard on != isCropping else { return }
+        if on {
+            // The video currently fills the window exactly; freeze it there in screen space.
+            content.cropRect = frame
+            contentResizeIncrements = NSSize(width: 1, height: 1) // clears the aspect-ratio lock
+            contentMinSize = NSSize(width: 60, height: 60)
+        } else {
+            // Back to "the window is the video": keep the current width, restore the ratio lock.
+            content.cropRect = nil
+            contentAspectRatio = videoSize
+            let short: CGFloat = 90, ratio = videoSize.width / videoSize.height
+            contentMinSize = ratio >= 1 ? NSSize(width: short * ratio, height: short) : NSSize(width: short, height: short / ratio)
+            let cw = contentRect(forFrameRect: frame).width
+            setContentSize(NSSize(width: cw, height: cw / ratio))
+        }
+        content.needsLayout = true
+        content.syncModeButtons()
+    }
+
     override var canBecomeKey: Bool { true }
-    override func close() { onClose?(); super.close() }
+    override func close() {
+        if let b = lockBadge { removeChildWindow(b); b.orderOut(nil) }
+        onClose?()
+        super.close()
+    }
 }
 
 private final class PanelContent: NSView, NSWindowDelegate {
     weak var panel: FloatingPanel?
     let layerView = NSView()
+    let videoLayer = CALayer()
     let bar = NSVisualEffectView()
     let slider = NSSlider(value: Settings.opacity, minValue: 0.1, maxValue: 1, target: nil, action: nil)
     private var tracking: NSTrackingArea?
     private var decoding = false
     private let playButton = RoundButton(symbol: "pause.fill", size: 56)
+    private let cropButton = RoundButton(symbol: "crop", size: 30)
+    private let lockButton = RoundButton(symbol: "lock.open", size: 30)
     private let controls = NSStackView()
+    private let modeButtons = NSStackView()
     private var hideTimer: Timer?
+    private var lastFrame = NSRect.zero
+
+    /// Crop mode: where the whole video sits, in screen coordinates. nil = normal mode (video fills the window).
+    var cropRect: NSRect? { didSet { needsLayout = true } }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         layerView.wantsLayer = true
-        layerView.layer?.contentsGravity = .resize
         layerView.layer?.backgroundColor = NSColor.black.cgColor
+        layerView.layer?.masksToBounds = true
         layerView.autoresizingMask = [.width, .height]
         layerView.frame = bounds
+        videoLayer.contentsGravity = .resize
+        videoLayer.actions = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull()]
+        layerView.layer?.addSublayer(videoLayer)
         addSubview(layerView)
 
         bar.material = .hudWindow
@@ -126,6 +208,20 @@ private final class PanelContent: NSView, NSWindowDelegate {
             controls.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
 
+        cropButton.target = self; cropButton.action = #selector(toggleCrop)
+        cropButton.toolTip = "Crop: resize without scaling the video (scroll to pan, pinch to zoom)"
+        lockButton.target = self; lockButton.action = #selector(lock)
+        lockButton.toolTip = "Lock: clicks pass through the window"
+        modeButtons.setViews([cropButton, lockButton], in: .trailing)
+        modeButtons.spacing = 8
+        modeButtons.translatesAutoresizingMaskIntoConstraints = false
+        modeButtons.alphaValue = 0
+        addSubview(modeButtons)
+        NSLayoutConstraint.activate([
+            modeButtons.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            modeButtons.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+        ])
+
         bar.translatesAutoresizingMaskIntoConstraints = false
         bar.alphaValue = 0
         addSubview(bar)
@@ -141,6 +237,14 @@ private final class PanelContent: NSView, NSWindowDelegate {
     @objc func togglePlay() { panel?.onCommand?("toggle", 0); showControls() }
     @objc func seekBack() { panel?.onCommand?("seek", -15); showControls() }
     @objc func seekFwd() { panel?.onCommand?("seek", 15); showControls() }
+    @objc func toggleCrop() { guard let p = panel else { return }; p.setCropping(!p.isCropping); showControls() }
+    @objc func lock() { panel?.setLocked(true) }
+
+    func syncModeButtons() {
+        cropButton.setSymbol(panel?.isCropping == true ? "crop.rotate" : "crop")
+        cropButton.layer?.backgroundColor = (panel?.isCropping == true
+            ? NSColor.controlAccentColor.withAlphaComponent(0.8) : NSColor.black.withAlphaComponent(0.45)).cgColor
+    }
 
     func setPaused(_ paused: Bool) {
         playButton.setSymbol(paused ? "play.fill" : "pause.fill")
@@ -148,7 +252,9 @@ private final class PanelContent: NSView, NSWindowDelegate {
 
     /// iOS-style: controls fade in on hover/click and fade out after a moment.
     func showControls() {
+        guard panel?.isLocked != true else { return }
         controls.animator().alphaValue = 1
+        modeButtons.animator().alphaValue = 1
         bar.animator().alphaValue = 1
         panel?.setCloseVisible(true)
         hideTimer?.invalidate()
@@ -157,6 +263,7 @@ private final class PanelContent: NSView, NSWindowDelegate {
     func hideControls() {
         hideTimer?.invalidate()
         controls.animator().alphaValue = 0
+        modeButtons.animator().alphaValue = 0
         bar.animator().alphaValue = 0
         panel?.setCloseVisible(false)
     }
@@ -174,17 +281,60 @@ private final class PanelContent: NSView, NSWindowDelegate {
             DispatchQueue.main.async {
                 self?.decoding = false
                 if let img {
-                    self?.layerView.layer?.contents = img
+                    self?.videoLayer.contents = img
                     self?.panel?.fit(to: NSSize(width: img.width, height: img.height))
                 }
             }
         }
     }
 
-    // ⌥-scroll changes opacity
+    // MARK: Layout — the video layer fills the window, or sits at `cropRect` (screen space) in crop mode.
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        if let r = cropRect, let win = window {
+            videoLayer.frame = NSRect(x: r.minX - win.frame.minX, y: r.minY - win.frame.minY, width: r.width, height: r.height)
+        } else {
+            videoLayer.frame = layerView.bounds
+        }
+        CATransaction.commit()
+    }
+
+    /// Keep at least part of the video inside the window so it can't be panned out of reach.
+    private func clampCrop() {
+        guard var r = cropRect, let win = window?.frame else { return }
+        let keep: CGFloat = 40
+        r.origin.x = min(max(r.origin.x, win.minX - r.width + keep), win.maxX - keep)
+        r.origin.y = min(max(r.origin.y, win.minY - r.height + keep), win.maxY - keep)
+        cropRect = r
+    }
+
+    // ⌥-scroll changes opacity; in crop mode plain scroll pans the video.
     override func scrollWheel(with event: NSEvent) {
-        guard event.modifierFlags.contains(.option), let p = panel else { return super.scrollWheel(with: event) }
-        p.setOpacity(Double(p.alphaValue) + Double(event.scrollingDeltaY) * 0.005)
+        guard let p = panel else { return super.scrollWheel(with: event) }
+        if event.modifierFlags.contains(.option) {
+            p.setOpacity(Double(p.alphaValue) + Double(event.scrollingDeltaY) * 0.005)
+        } else if var r = cropRect {
+            r.origin.x += event.scrollingDeltaX
+            r.origin.y -= event.scrollingDeltaY
+            cropRect = r
+            clampCrop()
+        } else {
+            super.scrollWheel(with: event)
+        }
+    }
+
+    // Pinch zooms the video around the cursor in crop mode.
+    override func magnify(with event: NSEvent) {
+        guard var r = cropRect else { return super.magnify(with: event) }
+        let f = 1 + event.magnification
+        let newW = r.width * f
+        guard newW >= 80, newW <= 8000 else { return }
+        let m = NSEvent.mouseLocation
+        r = NSRect(x: m.x - (m.x - r.minX) * f, y: m.y - (m.y - r.minY) * f, width: newW, height: r.height * f)
+        cropRect = r
+        clampCrop()
     }
 
     override func updateTrackingAreas() {
@@ -196,9 +346,72 @@ private final class PanelContent: NSView, NSWindowDelegate {
     override func mouseEntered(with event: NSEvent) { showControls() }
     override func mouseExited(with event: NSEvent) { hideControls() }
 
-    func windowDidEndLiveResize(_ n: Notification) { save() }
-    func windowDidMove(_ n: Notification) { save() }
+    // MARK: Window delegate
+
+    func windowDidMove(_ n: Notification) {
+        guard let win = window else { return }
+        // Dragging the window carries the video along; resizing from an edge (which also moves the
+        // origin) leaves the video where it is on screen, so the edge crops instead of scaling.
+        if var r = cropRect, !win.inLiveResize, lastFrame != .zero {
+            r.origin.x += win.frame.minX - lastFrame.minX
+            r.origin.y += win.frame.minY - lastFrame.minY
+            cropRect = r
+        }
+        lastFrame = win.frame
+        needsLayout = true
+        panel?.positionLockBadge()
+        save()
+    }
+    func windowDidResize(_ n: Notification) {
+        if let win = window { lastFrame = win.frame }
+        needsLayout = true
+        panel?.positionLockBadge()
+    }
+    func windowDidEndLiveResize(_ n: Notification) { clampCrop(); save() }
     private func save() { if let f = panel?.frame { UserDefaults.standard.set(NSStringFromRect(f), forKey: "panelFrame") } }
+}
+
+/// Small always-clickable badge shown in the corner while the panel is locked (click-through).
+private final class LockBadge: NSPanel {
+    private let onUnlock: () -> Void
+
+    init(onUnlock: @escaping () -> Void) {
+        self.onUnlock = onUnlock
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 30, height: 30),
+                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        isFloatingPanel = true
+        level = .floating
+        backgroundColor = .clear
+        isOpaque = false
+        hasShadow = false
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        let button = RoundButton(symbol: "lock.fill", size: 30)
+        button.target = self
+        button.action = #selector(unlock)
+        button.toolTip = "Unlock"
+        let host = HoverView(frame: NSRect(x: 0, y: 0, width: 30, height: 30))
+        host.addSubview(button)
+        NSLayoutConstraint.activate([
+            button.centerXAnchor.constraint(equalTo: host.centerXAnchor),
+            button.centerYAnchor.constraint(equalTo: host.centerYAnchor),
+        ])
+        contentView = host
+        alphaValue = 0.35
+        host.onHover = { [weak self] inside in self?.animator().alphaValue = inside ? 1 : 0.35 }
+    }
+
+    @objc private func unlock() { onUnlock() }
+}
+
+private final class HoverView: NSView {
+    var onHover: ((Bool) -> Void)?
+    override func updateTrackingAreas() {
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+        super.updateTrackingAreas()
+    }
+    override func mouseEntered(with event: NSEvent) { onHover?(true) }
+    override func mouseExited(with event: NSEvent) { onHover?(false) }
 }
 
 private extension NSLayoutConstraint {

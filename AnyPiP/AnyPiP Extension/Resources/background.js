@@ -1,5 +1,6 @@
 const api = typeof browser !== "undefined" ? browser : chrome;
 const WS_URL = "ws://127.0.0.1:48721";
+const action = api.action || api.browserAction; // MV2 manifest → browserAction
 
 let ws = null;
 let mode = "free"; // "apple" | "free"; same default as the app, which pushes the real value
@@ -27,7 +28,7 @@ const modeReady = api.storage.local.get("mode").then((r) => { if (r && r.mode) m
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   try { ws = new WebSocket(WS_URL); } catch (_) { return; }
-  ws.onopen = () => api.action.setBadgeText({ text: "" });
+  ws.onopen = () => action.setBadgeText({ text: "" });
   ws.onmessage = async (e) => {
     let m; try { m = JSON.parse(e.data); } catch (_) { return; }
     if (m.t === "settings") {
@@ -45,6 +46,12 @@ function connect() {
 }
 connect();
 setInterval(connect, 3000);
+
+// The app can wake us (SFSafariApplication.dispatchMessage) when it has a command and no socket.
+try {
+  const port = api.runtime.connectNative("application.id");
+  port.onMessage.addListener(() => connect());
+} catch (_) {}
 
 const wsOpen = () => ws && ws.readyState === WebSocket.OPEN;
 // Diagnostics go to the app's log (Safari's background console is hard to reach).
@@ -73,7 +80,7 @@ async function toggle(tab) {
   let type = "pip-toggle";
   if (mode === "free") {
     if (wsOpen()) type = "free-toggle";
-    else api.action.setBadgeText({ text: "!" }); // app not running -> fall back to Apple PiP
+    else action.setBadgeText({ text: "!" }); // app not running -> fall back to Apple PiP
   }
   for (const f of await frames(tab.id)) {
     try {
@@ -107,7 +114,7 @@ api.runtime.onMessage.addListener((msg, sender) => {
   }
 });
 
-api.action.onClicked.addListener(toggle);
+action.onClicked.addListener(toggle);
 api.commands.onCommand.addListener(async (cmd) => {
   if (cmd !== "toggle-pip") return;
   const [tab] = await api.tabs.query({ active: true, currentWindow: true });

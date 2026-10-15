@@ -1,18 +1,22 @@
 import Cocoa
+import SafariServices
 
 @main
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let server = ExtensionServer()
     var panel: FloatingPanel?
     var statusItem: NSStatusItem?
     let freeItem = NSMenuItem(title: "Free PiP (resizable, opacity)", action: #selector(pickFree), keyEquivalent: "")
     let appleItem = NSMenuItem(title: "Apple PiP (system window)", action: #selector(pickApple), keyEquivalent: "")
+    let lockItem = NSMenuItem(title: "Lock Free PiP window (click-through)", action: #selector(toggleLock), keyEquivalent: "l")
+    private var lastWake = Date.distantPast
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         server.onStart = { [weak self] w, h, _ in DispatchQueue.main.async { self?.openPanel(w: w, h: h) } }
         server.onFrame = { [weak self] data, paused in DispatchQueue.main.async { self?.panel?.show(frame: data, paused: paused) } }
         server.onState = { [weak self] paused in DispatchQueue.main.async { self?.panel?.setPaused(paused) } }
         server.onStop = { [weak self] in DispatchQueue.main.async { self?.closePanel(notify: false) } }
+        server.onNeedWake = { [weak self] in DispatchQueue.main.async { self?.wakeExtension() } }
         // A windowless menu-bar app is a candidate for macOS automatic termination; the OS was
         // quietly killing us while idle, which dropped the extension's socket.
         ProcessInfo.processInfo.disableAutomaticTermination("Serving the Safari extension")
@@ -34,13 +38,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         for i in [freeItem, appleItem] { i.target = self; menu.addItem(i) }
         menu.addItem(.separator())
+        lockItem.target = self
+        menu.addItem(lockItem)
+        menu.addItem(.separator())
         let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
         menu.addItem(NSMenuItem(title: "Quit AnyPiP", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.delegate = self
         item.menu = menu
         statusItem = item
         refreshModeChecks()
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        lockItem.isEnabled = panel != nil
+        lockItem.state = panel?.isLocked == true ? .on : .off
+    }
+    @objc func toggleLock() { guard let p = panel else { return }; p.setLocked(!p.isLocked) }
+    @objc func validateMenuItem(_ item: NSMenuItem) -> Bool { item === lockItem ? panel != nil : true }
+
+    /// Safari unloads an idle extension background page, and nothing on its side wakes it while the
+    /// video is paused in an inactive Safari. Poke it from here; it reconnects and gets the queued command.
+    func wakeExtension() {
+        guard Date().timeIntervalSince(lastWake) > 2 else { return }
+        lastWake = Date()
+        SFSafariApplication.dispatchMessage(withName: "wake", toExtensionWithIdentifier: extensionBundleIdentifier, userInfo: nil) { _ in }
     }
 
     func refreshModeChecks() {
