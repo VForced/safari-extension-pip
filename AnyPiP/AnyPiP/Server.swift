@@ -34,6 +34,7 @@ final class ExtensionServer {
             guard let self, let conn else { return }
             switch state {
             case .ready:
+                NSLog("AnyPiP: extension connected")
                 if self.client !== conn { self.client?.cancel() }
                 self.client = conn
                 self.write(["t": "settings", "mode": Settings.mode])
@@ -74,6 +75,8 @@ final class ExtensionServer {
                     self.onStart?(obj["w"] as? Int ?? 16, obj["h"] as? Int ?? 9, obj["title"] as? String ?? "")
                 case "free-stop":
                     self.onStop?()
+                case "log":
+                    NSLog("AnyPiP ext: %@", obj["m"] as? String ?? "")
                 default: break
                 }
             }

@@ -13,6 +13,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         server.onFrame = { [weak self] data, paused in DispatchQueue.main.async { self?.panel?.show(frame: data, paused: paused) } }
         server.onState = { [weak self] paused in DispatchQueue.main.async { self?.panel?.setPaused(paused) } }
         server.onStop = { [weak self] in DispatchQueue.main.async { self?.closePanel(notify: false) } }
+        // A windowless menu-bar app is a candidate for macOS automatic termination; the OS was
+        // quietly killing us while idle, which dropped the extension's socket.
+        ProcessInfo.processInfo.disableAutomaticTermination("Serving the Safari extension")
+        ProcessInfo.processInfo.disableSuddenTermination()
         server.start()
         setupStatusItem()
         // Menu-bar agent: no Dock icon, and no window at launch (Settings… opens it on demand).

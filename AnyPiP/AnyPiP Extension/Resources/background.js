@@ -47,6 +47,8 @@ connect();
 setInterval(connect, 3000);
 
 const wsOpen = () => ws && ws.readyState === WebSocket.OPEN;
+// Diagnostics go to the app's log (Safari's background console is hard to reach).
+const log = (m) => { if (wsOpen()) ws.send(JSON.stringify({ t: "log", m: String(m) })); };
 
 async function frames(tabId) {
   try { return (await api.webNavigation.getAllFrames({ tabId })) || [{ frameId: 0 }]; }
@@ -67,6 +69,7 @@ async function toggle(tab) {
   await modeReady;
   connect();
   if (mode === "free") await ensureApp();
+  log(`toggle: mode=${mode} ws=${wsOpen()}`);
   let type = "pip-toggle";
   if (mode === "free") {
     if (wsOpen()) type = "free-toggle";
@@ -75,8 +78,9 @@ async function toggle(tab) {
   for (const f of await frames(tab.id)) {
     try {
       const r = await api.tabs.sendMessage(tab.id, { type }, { frameId: f.frameId });
+      log(`frame ${f.frameId} ${type} -> ${JSON.stringify(r)}`);
       if (r && r.ok) { if (type === "free-toggle") setFreeTab(r.active ? tab.id : null); return; }
-    } catch (_) {}
+    } catch (e) { log(`frame ${f.frameId} ${type} threw ${e}`); }
   }
 }
 

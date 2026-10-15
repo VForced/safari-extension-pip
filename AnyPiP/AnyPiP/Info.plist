@@ -4,6 +4,10 @@
 <dict>
 	<key>SFSafariWebExtensionConverterVersion</key>
 	<string>27.0</string>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
 	<key>LSUIElement</key>
 	<true/>
 	<key>CFBundleURLTypes</key>
