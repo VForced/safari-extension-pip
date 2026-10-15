@@ -29,7 +29,7 @@
 - **Always on top, on every Space** — the Free PiP window floats above full-screen apps too.
 - **Remembers** window size/position, opacity and mode.
 - **Lock (click-through)** — 🔒 in the top-right corner makes the window ignore the mouse; a small lock badge (or the menu bar, ⌘L) unlocks it.
-- **Crop** — resize the window to show just part of the video (e.g. the square content of a wide video): edges cut, drag pans, wheel/pinch zooms, ⌘-drag moves the window. Resets on each new PiP.
+- **Crop** — resize the window to show just part of the video (e.g. the square content of a wide video): edges cut, drag pans, wheel/pinch zooms, ⌘-drag moves the window. Press crop again to finish: the window keeps showing that part and resizes normally. Resets on each new PiP.
 - **Menu bar icon** for switching modes and opening Settings (Safari's own right-click menu can't be extended).
 - **Auto-starts the app** — the extension launches the companion app in the background when needed.
 

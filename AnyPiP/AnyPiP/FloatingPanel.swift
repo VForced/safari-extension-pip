@@ -7,6 +7,7 @@ import Cocoa
 ///   A small lock badge stays clickable in the corner to unlock (also: menu bar → Unlock).
 /// - **Crop** (fixed scale): resizing the window no longer scales the video — it reveals or hides part
 ///   of it, like a viewport. Drag to pan the video, scroll wheel (or pinch) to zoom, ⌘-drag moves the window.
+///   Turning crop off keeps the result: the window shows that part and scales normally, until PiP closes.
 final class FloatingPanel: NSPanel {
     private let content = PanelContent()
     private var lockBadge: LockBadge?
@@ -71,6 +72,7 @@ final class FloatingPanel: NSPanel {
             if abs(r.width / r.height - ratio) > 0.01 { r.size.height = r.width / ratio; content.cropRect = r }
             return
         }
+        if content.keptCrop != nil { return } // the window follows the crop's shape, not the video's
         // Min size must itself have the video's ratio, or the aspect lock breaks when squeezed.
         let short: CGFloat = 90
         contentMinSize = ratio >= 1 ? NSSize(width: short * ratio, height: short) : NSSize(width: short, height: short / ratio)
@@ -116,23 +118,47 @@ final class FloatingPanel: NSPanel {
 
     // MARK: Crop (fixed scale viewport)
 
+    /// Crop *editing*. Turning it off keeps the chosen crop (until this PiP closes): the window then
+    /// shows just that part of the video and scales it normally, locked to the crop's aspect ratio.
     func setCropping(_ on: Bool) {
         guard on != isCropping else { return }
         if on {
-            // The video currently fills the window exactly; freeze it there in screen space.
-            content.cropRect = frame
+            // Put the whole video in screen space where it currently is: it fills the window, or,
+            // with a kept crop, extends beyond it so the visible part stays exactly in place.
+            let f = frame
+            if let n = content.keptCrop {
+                let w = f.width / n.width, h = f.height / n.height
+                content.cropRect = NSRect(x: f.minX - n.minX * w, y: f.minY - n.minY * h, width: w, height: h)
+            } else {
+                content.cropRect = f
+            }
+            content.keptCrop = nil
             isMovableByWindowBackground = false // drags pan the video now; ⌘-drag moves the window
             contentResizeIncrements = NSSize(width: 1, height: 1) // clears the aspect-ratio lock
             contentMinSize = NSSize(width: 60, height: 60)
         } else {
-            // Back to "the window is the video": keep the current width, restore the ratio lock.
+            guard let r = content.cropRect else { return }
+            let f = frame
+            // The window's part of the video, as fractions of the video (may reach past 0…1 = black).
+            let n = NSRect(x: (f.minX - r.minX) / r.width, y: (f.minY - r.minY) / r.height,
+                           width: f.width / r.width, height: f.height / r.height)
             content.cropRect = nil
             isMovableByWindowBackground = true
-            contentAspectRatio = videoSize
-            let short: CGFloat = 90, ratio = videoSize.width / videoSize.height
-            contentMinSize = ratio >= 1 ? NSSize(width: short * ratio, height: short) : NSSize(width: short, height: short / ratio)
-            let cw = contentRect(forFrameRect: frame).width
-            setContentSize(NSSize(width: cw, height: cw / ratio))
+            let whole = abs(n.minX) < 0.005 && abs(n.minY) < 0.005 && abs(n.width - 1) < 0.005 && abs(n.height - 1) < 0.005
+            if whole {
+                // Nothing cropped: back to "the window is the video".
+                content.keptCrop = nil
+                contentAspectRatio = videoSize
+                let short: CGFloat = 90, ratio = videoSize.width / videoSize.height
+                contentMinSize = ratio >= 1 ? NSSize(width: short * ratio, height: short) : NSSize(width: short, height: short / ratio)
+                let cw = contentRect(forFrameRect: f).width
+                setContentSize(NSSize(width: cw, height: cw / ratio))
+            } else {
+                content.keptCrop = n
+                contentAspectRatio = f.size
+                let short: CGFloat = 60, ratio = f.width / f.height
+                contentMinSize = ratio >= 1 ? NSSize(width: short * ratio, height: short) : NSSize(width: short, height: short / ratio)
+            }
         }
         content.needsLayout = true
         content.syncModeButtons()
@@ -164,6 +190,8 @@ private final class PanelContent: NSView, NSWindowDelegate {
 
     /// Crop mode: where the whole video sits, in screen coordinates. nil = normal mode (video fills the window).
     var cropRect: NSRect? { didSet { needsLayout = true } }
+    /// A finished crop: the window's part of the video as fractions of the video. Lives until the panel closes.
+    var keptCrop: NSRect? { didSet { needsLayout = true } }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -244,6 +272,8 @@ private final class PanelContent: NSView, NSWindowDelegate {
 
     func syncModeButtons() {
         cropButton.setSymbol(panel?.isCropping == true ? "crop.rotate" : "crop")
+        cropButton.layer?.borderWidth = keptCrop != nil ? 1.5 : 0 // a crop is applied
+        cropButton.layer?.borderColor = NSColor.controlAccentColor.cgColor
         cropButton.layer?.backgroundColor = (panel?.isCropping == true
             ? NSColor.controlAccentColor.withAlphaComponent(0.8) : NSColor.black.withAlphaComponent(0.45)).cgColor
     }
@@ -309,6 +339,9 @@ private final class PanelContent: NSView, NSWindowDelegate {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         if let r = cropRect, let win = window {
             videoLayer.frame = NSRect(x: r.minX - win.frame.minX, y: r.minY - win.frame.minY, width: r.width, height: r.height)
+        } else if let n = keptCrop {
+            let b = layerView.bounds, w = b.width / n.width, h = b.height / n.height
+            videoLayer.frame = NSRect(x: -n.minX * w, y: -n.minY * h, width: w, height: h)
         } else {
             videoLayer.frame = layerView.bounds
         }
