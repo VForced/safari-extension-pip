@@ -91,9 +91,13 @@
     };
     schedule();
     // Watchdog: if frame callbacks stall (hidden/throttled tab), fall back to polling.
+    let lastPing = 0;
     timer = setInterval(() => {
       if (!video) return;
-      if (performance.now() - last > 250 && !video.paused) pump();
+      const now = performance.now();
+      if (now - last > 250 && !video.paused) pump();
+      // No frames flow while paused; ping so Safari keeps the background page (and the app socket) alive.
+      if (now - lastPing > 2000) { lastPing = now; api.runtime.sendMessage({ type: "ping" }).catch(() => {}); }
     }, 100);
     return { ok: true, active: true };
   }
@@ -103,7 +107,10 @@
     if (msg.type === "free-stop") { stopFree(false); return; }
     if (msg.type === "free-cmd") {
       if (!video) return;
-      if (msg.a === "toggle") { video.paused ? video.play() : video.pause(); }
+      if (msg.a === "toggle") {
+        if (video.paused) video.play().catch(() => { const m = video.muted; video.muted = true; video.play().then(() => { video.muted = m; }).catch(() => {}); });
+        else video.pause();
+      }
       else if (msg.a === "seek") {
         const t = video.currentTime + (msg.d || 0);
         video.currentTime = Math.max(0, isFinite(video.duration) ? Math.min(video.duration, t) : t);

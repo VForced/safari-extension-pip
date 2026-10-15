@@ -2,7 +2,7 @@ const api = typeof browser !== "undefined" ? browser : chrome;
 const WS_URL = "ws://127.0.0.1:48721";
 
 let ws = null;
-let mode = "apple"; // "apple" | "free"; the app pushes the real value
+let mode = "free"; // "apple" | "free"; same default as the app, which pushes the real value
 // The background page can be unloaded between messages, so keep the Free-PiP tab in storage.
 let freeTabId = null;
 const setFreeTab = (id) => { freeTabId = id; api.storage.local.set({ freeTab: id }).catch(() => {}); };
@@ -21,7 +21,8 @@ async function toActiveTabs(msg) {
   ids.forEach((id) => api.tabs.sendMessage(id, msg).catch(() => {}));
 }
 
-api.storage.local.get("mode").then((r) => { if (r && r.mode) mode = r.mode; }).catch(() => {});
+// The click that wakes this page can arrive before storage is read — toggle() awaits this.
+const modeReady = api.storage.local.get("mode").then((r) => { if (r && r.mode) mode = r.mode; }).catch(() => {});
 
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
@@ -63,6 +64,7 @@ async function ensureApp() {
 
 async function toggle(tab) {
   if (!tab || tab.id == null) return;
+  await modeReady;
   connect();
   if (mode === "free") await ensureApp();
   let type = "pip-toggle";
@@ -87,7 +89,9 @@ api.runtime.onMessage.addListener((msg, sender) => {
     if (wsOpen() && ws.bufferedAmount < 1_000_000) ws.send("F" + (msg.p ? "1" : "0") + "|" + msg.d);
     return Promise.resolve();
   }
+  if (msg.type === "ping") { connect(); return Promise.resolve(); } // keeps us loaded + socket up while paused
   if (msg.type === "state") {
+    connect();
     if (wsOpen()) ws.send("S" + (msg.p ? "1" : "0"));
     return Promise.resolve();
   }

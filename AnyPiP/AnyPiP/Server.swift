@@ -12,7 +12,10 @@ final class ExtensionServer {
     private var rxCount = 0, rxSince = Date()
 
     private var listener: NWListener?
-    private var client: NWConnection?
+    private var client: NWConnection?   // only a client in .ready state; touched on `queue` only
+    // Safari unloads the extension's background page when idle (e.g. video paused, no frames),
+    // closing the socket. Messages sent meanwhile wait here and go out when it reconnects.
+    private var pending: [[String: Any]] = []
     private let queue = DispatchQueue(label: "anypip.server")
 
     func start() {
@@ -27,18 +30,33 @@ final class ExtensionServer {
     }
 
     private func accept(_ conn: NWConnection) {
-        client?.cancel()
-        client = conn
         conn.stateUpdateHandler = { [weak self, weak conn] state in
             guard let self, let conn else { return }
-            if case .ready = state { self.pushSettings(); self.receive(conn) }
+            switch state {
+            case .ready:
+                if self.client !== conn { self.client?.cancel() }
+                self.client = conn
+                self.write(["t": "settings", "mode": Settings.mode])
+                let queued = self.pending; self.pending.removeAll()
+                queued.forEach { self.write($0) }
+                self.receive(conn)
+            case .failed, .cancelled:
+                self.drop(conn)
+            default: break
+            }
         }
         conn.start(queue: queue)
     }
 
+    private func drop(_ conn: NWConnection) {
+        if client === conn { client = nil }
+        conn.cancel()
+    }
+
     private func receive(_ conn: NWConnection) {
         conn.receiveMessage { [weak self] data, _, _, error in
-            guard let self, error == nil else { return }
+            guard let self else { return }
+            if error != nil { self.drop(conn); return }
             if let data, let first = data.first, first == 0x46 /* F */ || first == 0x53 /* S */ {
                 if first == 0x53 { self.onState?(data.count > 1 && data[data.startIndex + 1] == 0x31) }
                 else if let bar = data.firstIndex(of: 0x7C), let jpeg = Data(base64Encoded: data[(bar + 1)...]) {
@@ -63,16 +81,29 @@ final class ExtensionServer {
         }
     }
 
-    func send(_ obj: [String: Any]) {
+    /// Queue-safe send; held until a client is connected (settings are always re-sent on connect).
+    func send(_ obj: [String: Any], queueIfOffline: Bool = true) {
+        queue.async {
+            if self.client == nil {
+                if queueIfOffline { self.pending.append(obj); if self.pending.count > 20 { self.pending.removeFirst() } }
+                return
+            }
+            self.write(obj)
+        }
+    }
+
+    private func write(_ obj: [String: Any]) {
         guard let conn = client, let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
         let meta = NWProtocolWebSocket.Metadata(opcode: .text)
         let ctx = NWConnection.ContentContext(identifier: "msg", metadata: [meta])
-        conn.send(content: data, contentContext: ctx, isComplete: true, completion: .idempotent)
+        conn.send(content: data, contentContext: ctx, isComplete: true, completion: .contentProcessed { [weak self] err in
+            guard let self, err != nil else { return }
+            self.pending.append(obj) // failed mid-reconnect: retry on next connect
+            self.drop(conn)
+        })
     }
 
-    func pushSettings() {
-        send(["t": "settings", "mode": Settings.mode])
-    }
+    func pushSettings() { send(["t": "settings", "mode": Settings.mode], queueIfOffline: false) }
     func command(_ action: String, delta: Double = 0) { send(["t": "cmd", "a": action, "d": delta]) }
     func notifyClosed() { send(["t": "closed"]) }
 }
