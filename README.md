@@ -18,6 +18,8 @@
 | Opacity | Fixed | **Adjustable** (slider or ⌥-scroll) |
 | Controls | System | **Translucent iOS-style**: play/pause, ±15 s |
 | On-page video | Stays | Hidden while PiP is open, restored (and paused) on close |
+| Click-through | — | **Lock** mode: clicks pass through to what's underneath |
+| Crop | — | **Crop** mode: window edges cut the video instead of scaling it |
 
 ## Features
 
@@ -26,6 +28,8 @@
 - **Works where native PiP is blocked** — strips `disablepictureinpicture` on sites that hide it.
 - **Always on top, on every Space** — the Free PiP window floats above full-screen apps too.
 - **Remembers** window size/position, opacity and mode.
+- **Lock (click-through)** — 🔒 in the top-right corner makes the window ignore the mouse; a small lock badge (or the menu bar, ⌘L) unlocks it.
+- **Crop** — resize the window to show just part of the video (e.g. the square content of a wide video): edges cut, drag pans, wheel/pinch zooms, ⌘-drag moves the window. Resets on each new PiP.
 - **Menu bar icon** for switching modes and opening Settings (Safari's own right-click menu can't be extended).
 - **Auto-starts the app** — the extension launches the companion app in the background when needed.
 
@@ -65,6 +69,7 @@ Unsigned/ad-hoc builds additionally need *Develop → Allow Unsigned Extensions*
 
 1. Play a video, click the toolbar button (or press **⌥⇧P**).
 2. Hover the Free PiP window to reveal the controls; drag any edge to resize; **⌥-scroll** or the slider changes opacity.
+   Top-right buttons: **crop** and **lock**.
 3. Switch mode from the menu bar icon (or the app's Settings window).
 
 ## Project layout
